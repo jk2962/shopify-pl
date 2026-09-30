@@ -1,0 +1,13 @@
+{
+  "name": "shopify-pl",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node --test 'test/**/*.test.js'",
+    "push": "clasp push",
+    "open": "clasp open-container"
+  },
+  "devDependencies": {
+    "@google/clasp": "3.4.1"
+  }
+}
