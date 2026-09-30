@@ -61,3 +61,62 @@ test/pl.test.js with hand-computed expected values for: single order; discount; 
 
 ## Done when
 All tests pass; demo mode shows a correct P/L for all four timeframes; changing default COGS from 1 to 2 updates the P/L without a sync; a synced dev store's net sales match Shopify's Sales report for the same date range; a non-developer can follow the README setup.
+
+## Decisions
+
+Approved after step-1 planning, verified against shopify.dev for the pinned API version below. These override anything in the body of this spec that conflicts.
+
+### API version
+Pinned to **2026-07** (latest stable as of planning: released 2026-07-01, supported until 2027-07-16 15:00 UTC). One constant, `API_VERSION`, in `src/shopify.js`.
+
+### Money representation
+All amounts held as integer cents throughout `pl.js` (`MoneyV2.amount` arrives as a Decimal-as-string; convert with `Math.round(parseFloat(amount) * 100)`). Divide only at display time.
+
+### Original vs. current amounts (no double-counting refunds)
+Gross sales, discounts, and shipping charged are built ONLY from original/order-level fields. Returns and all refund effects come ONLY from `Order.refunds`, dated by the refund. `current*` fields (`currentTotalPriceSet`, `currentSubtotalPriceSet`, `currentTotalDiscountsSet`, `currentShippingPriceSet`, `LineItem.currentQuantity`, `LineItem.refundableQuantity`) are never read — they already have refunds subtracted, so combining them with a separate refund subtraction would double-count.
+
+- Gross sales = Σ (`LineItem.originalUnitPriceSet.shopMoney.amount` × `LineItem.quantity`). `quantity` includes refunded/removed units (per docs), which is what we want for "units sold."
+- Units = Σ `LineItem.quantity`.
+
+### Discounts — deterministic, not deferred (supersedes original plan's `totalDiscountsSet` + fallback)
+`Order.totalDiscountsSet` is **never used** — its interaction with shipping discounts is unverified and the dev store has no shipping discount to test it against. Instead:
+- Merchandise discounts = Σ `LineItem.discountAllocations[].allocatedAmountSet.shopMoney.amount` (verified: `[DiscountAllocation!]!`, a plain list, includes line-level, order-level, and code-based allocations, at +3 query-cost points per line item).
+- `discountAllocations` added to the `lineItems` selection in the sync query.
+- Test required: an order with a shipping discount proving it is counted exactly once (in Shipping charged, not in Discounts, and not double-counted).
+
+### Shipping charged — exact field (supersedes `Order.totalShippingPriceSet`)
+Shipping charged = Σ over `Order.shippingLines.nodes[].discountedPriceSet.shopMoney.amount` (verified field: "The shipping price after applying discounts," `MoneyBag!`, not deprecated; `ShippingLineConnection` confirmed to expose `.nodes`). `Order.totalShippingPriceSet` and `ShippingLine.originalPriceSet`/`price` are not used.
+
+### Cancelled and test orders
+Counted order = `Order.test === false` AND `Order.cancelledAt === null`. Both are reliable, documented booleans/nullable-dates on `Order` in 2026-07 — no fallback heuristic needed. `Order.test`: *"Whether the order is a test. Test orders are made using the Shopify Bogus Gateway or a payment provider with test mode enabled."* `Order.cancelledAt`: *"Returns `null` if the order hasn't been canceled."* Excluded orders are still written to the Orders tab (visible, with Test/Cancelled flags) but contribute $0 to every P/L column, including their refunds.
+
+### AOV
+AOV = Net sales ÷ Orders (Orders = counted orders only, cancelled/test excluded). Zero counted orders in a period → blank, not a division error. Documented in the P/L tab's "How numbers are calculated" note.
+
+### No refunded dollar disappears silently (supersedes "Returns = refunded merchandise" wording)
+Every refund is fully accounted for across three buckets, by exact field, all dated to the refund:
+- **Merchandise returns** → Returns: Σ `RefundLineItem.subtotalSet.shopMoney.amount` (ex-tax; tax lives separately in `RefundLineItem.totalTaxSet` and is not read).
+- **Shipping refunds** → reduce Shipping charged (not Returns): Σ `RefundShippingLine.subtotalAmountSet.shopMoney.amount` (ex-tax; `taxAmountSet` not read).
+- **Discretionary/manual refunds not tied to any line item or shipping line** (e.g. goodwill) → Returns: Σ `Refund.orderAdjustments.nodes[].amountSet.shopMoney.amount` (ex-tax; `taxAmountSet` not read; verified `OrderAdjustmentConnection` exposes `.nodes`).
+- All three bucket on **`Refund.processedAt`** (`DateTime!`, non-null — preferred over the originally-planned `createdAt`, which is nullable). `Refund.updatedAt` is the fallback only if `processedAt` is ever absent in practice.
+- Taxes stay excluded throughout by construction (only `*Set`/`amountSet`, never `taxAmountSet` or `totalTaxSet`, are summed).
+
+Required tests: one order with a shipping refund (proves it reduces Shipping charged, not Returns); one order with a $10 no-line-item discretionary refund (proves it lands in Returns via `orderAdjustments`, not silently dropped).
+
+### Truncation detection (supersedes line-item-based check)
+Refund-list truncation is detected by comparing the sum of fetched `Refund.totalRefundedSet` against `Order.totalRefundedSet`, NOT by checking `refundLineItems`/`pageInfo` — a refund with no line items (shipping-only or discretionary) is valid and must not trigger a false refetch. Mismatch ⇒ refetch that order alone with a higher `refunds(first: …)`.
+
+### Incremental sync overlap
+Incremental sync queries `updated_at:>` (last sync time − 10 minutes), not the raw last-sync timestamp. Upsert by `Order.id` makes the resulting re-fetches harmless. Guards against any order whose `updatedAt` advance and the previous sync's read landing in the same narrow window.
+
+### Query shape and cost (confirmed 2026-07)
+- `orders(first, after, query, sortKey: UPDATED_AT, reverse)` on `OrderConnection` — `.nodes`/`.pageInfo` confirmed; `UPDATED_AT` confirmed in `OrderSortKeys`.
+- Per-order cost with the full selection (line items + discountAllocations + shipping lines + refunds incl. shipping lines and order adjustments) runs materially higher than the original ~114-point estimate; page size is tuned from the live `extensions.cost.requestedQueryCost`/`throttleStatus`, not hardcoded to 250. 1,000-point hard cap per query confirmed store-plan-independent.
+- Nested-connection truncation (line items, discountAllocations, shippingLines, refundLineItems, refund orderAdjustments) is checked via each connection's own `pageInfo.hasNextPage`; refunds-list truncation via the `totalRefundedSet` comparison above.
+
+### Other approved-as-written assumptions (from step-1 plan §10)
+- `Refund.createdAt` being nullable is moot now that `processedAt` (non-null) is the primary refund-dating field.
+- `Order.taxesIncluded` is read; any counted order with it `true` shows the "taxes excluded" caveat is unverified for that order (banner), since all summed fields are documented as tax-exclusive but a tax-inclusive shop was never tested against this plan.
+- Single shop currency: only `shopMoney` read everywhere; `presentmentMoney` unused.
+- Shipping cost (the owner's cost, from Settings) uses units/orders **sold**, never reversed on refund, per spec.
+- Auth flow (Dev Dashboard client-credentials grant) remains unverified until step 4 — not guessed at, not started.
