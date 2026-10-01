@@ -1,0 +1,62 @@
+{
+  "data": {
+    "orders": {
+      "pageInfo": { "hasNextPage": false, "endCursor": null },
+      "nodes": [
+        {
+          "id": "gid://shopify/Order/5551009",
+          "name": "#1009",
+          "test": false,
+          "cancelledAt": null,
+          "processedAt": "2026-06-15T14:00:00Z",
+          "updatedAt": "2026-06-20T10:00:00Z",
+          "taxesIncluded": false,
+          "currencyCode": "USD",
+          "lineItems": {
+            "pageInfo": { "hasNextPage": false },
+            "nodes": [
+              {
+                "sku": "MUG-01",
+                "quantity": 2,
+                "originalUnitPriceSet": { "shopMoney": { "amount": "15.00" } },
+                "discountAllocations": []
+              },
+              {
+                "sku": "TEE-01",
+                "quantity": 1,
+                "originalUnitPriceSet": { "shopMoney": { "amount": "25.00" } },
+                "discountAllocations": []
+              }
+            ]
+          },
+          "shippingLines": {
+            "nodes": []
+          },
+          "refunds": [
+            {
+              "id": "gid://shopify/Refund/9001",
+              "processedAt": "2026-06-18T09:00:00Z",
+              "updatedAt": "2026-06-18T09:05:00Z",
+              "refundLineItems": {
+                "pageInfo": { "hasNextPage": false },
+                "nodes": [
+                  {
+                    "quantity": 1,
+                    "subtotalSet": { "shopMoney": { "amount": "15.00" } },
+                    "lineItem": { "sku": "MUG-01" }
+                  }
+                ]
+              },
+              "refundShippingLines": {
+                "nodes": []
+              },
+              "orderAdjustments": {
+                "nodes": []
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
