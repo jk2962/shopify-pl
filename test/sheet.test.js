@@ -1,6 +1,13 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { buildDemoOrders, dollarsToCents, centsToDollars, mergeOrdersById } = require('../src/sheet.js');
+const {
+  buildDemoOrders,
+  dollarsToCents,
+  centsToDollars,
+  mergeOrdersById,
+  isDemoOrderId,
+  dropDemoOrders,
+} = require('../src/sheet.js');
 
 test('dollarsToCents / centsToDollars round-trip', () => {
   assert.equal(dollarsToCents('2.50'), 250);
@@ -56,4 +63,32 @@ test('mergeOrdersById upserts by id: updates existing orders, appends new ones',
   assert.equal(byId.get('gid://shopify/Order/1').grossCents, 1000, 'untouched order is kept as-is');
   assert.equal(byId.get('gid://shopify/Order/2').grossCents, 2500, 'matching id is overwritten, not duplicated');
   assert.equal(byId.get('gid://shopify/Order/3').grossCents, 3000, 'new id is appended');
+});
+
+test('isDemoOrderId recognizes demo-* ids only', () => {
+  assert.equal(isDemoOrderId('demo-1'), true);
+  assert.equal(isDemoOrderId('demo-120'), true);
+  assert.equal(isDemoOrderId('gid://shopify/Order/5551009'), false);
+  assert.equal(isDemoOrderId(undefined), false);
+});
+
+test('dropDemoOrders strips every demo row and keeps real ones', () => {
+  const orders = [
+    { id: 'demo-1', name: '#1000' },
+    { id: 'gid://shopify/Order/1', name: '#2000' },
+    { id: 'demo-2', name: '#1001' },
+  ];
+  const kept = dropDemoOrders(orders);
+  assert.deepEqual(kept.map((o) => o.id), ['gid://shopify/Order/1']);
+});
+
+test('a real sync (upsertOrders semantics) must remove demo rows, not merge them', () => {
+  const existingSheetRows = [...buildDemoOrders(), { id: 'gid://shopify/Order/999', name: '#9000' }];
+  const incomingRealOrders = [{ id: 'gid://shopify/Order/999', name: '#9000', grossCents: 5000 }];
+
+  const merged = mergeOrdersById(dropDemoOrders(existingSheetRows), incomingRealOrders);
+
+  assert.equal(merged.some((o) => isDemoOrderId(o.id)), false, 'no demo-* id should survive a real sync');
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].grossCents, 5000);
 });

@@ -218,6 +218,15 @@ function readOrders(ss) {
     });
 }
 
+function isDemoOrderId(id) {
+  return typeof id === 'string' && id.startsWith('demo-');
+}
+
+// A real sync must never leave demo rows mixed in with synced orders.
+function dropDemoOrders(orders) {
+  return orders.filter((o) => !isDemoOrderId(o.id));
+}
+
 function mergeOrdersById(existingOrders, incomingOrders) {
   const byId = new Map();
   for (const order of existingOrders) byId.set(order.id, order);
@@ -226,7 +235,7 @@ function mergeOrdersById(existingOrders, incomingOrders) {
 }
 
 function upsertOrders(ss, incomingOrders) {
-  const merged = mergeOrdersById(readOrders(ss), incomingOrders);
+  const merged = mergeOrdersById(dropDemoOrders(readOrders(ss)), incomingOrders);
   writeOrders(ss, merged);
 }
 
@@ -466,5 +475,12 @@ function loadDemoData(ss) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { buildDemoOrders, dollarsToCents, centsToDollars, mergeOrdersById };
+  module.exports = {
+    buildDemoOrders,
+    dollarsToCents,
+    centsToDollars,
+    mergeOrdersById,
+    isDemoOrderId,
+    dropDemoOrders,
+  };
 }

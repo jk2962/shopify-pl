@@ -35,13 +35,16 @@ function recalculateMenu() {
 
 function loadDemoDataMenu() {
   const ui = SpreadsheetApp.getUi();
-  const response = ui.alert(
-    'Load demo data',
-    'This replaces everything in the Orders tab with ~120 sample orders. Continue?',
-    ui.ButtonSet.YES_NO
-  );
+  const ss = SpreadsheetApp.getActive();
+  ensureOrdersSheet(ss);
+  const hasRealOrders = readOrders(ss).some((o) => !isDemoOrderId(o.id));
+  const message = hasRealOrders
+    ? 'This Orders tab has real synced Shopify orders. Loading demo data will ERASE them and replace ' +
+      'everything with ~120 sample orders. Continue?'
+    : 'This replaces everything in the Orders tab with ~120 sample orders. Continue?';
+  const response = ui.alert('Load demo data', message, ui.ButtonSet.YES_NO);
   if (response !== ui.Button.YES) return;
-  loadDemoData(SpreadsheetApp.getActive());
+  loadDemoData(ss);
   ui.alert('Demo data loaded ✅');
 }
 
