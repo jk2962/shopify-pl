@@ -19,9 +19,14 @@ function syncNow() {
   const ui = SpreadsheetApp.getUi();
   try {
     const result = runSync(SpreadsheetApp.getActive());
-    const message = result.done
-      ? `Sync complete — ${result.ordersSynced} orders updated this pass`
-      : `Syncing — ${result.ordersSynced} orders so far, continuing automatically…`;
+    let message;
+    if (!result.done) {
+      message = `Synced ${result.ordersSynced} orders so far, continuing automatically…`;
+    } else if (result.ordersSynced === 0) {
+      message = 'No new or changed orders since last sync';
+    } else {
+      message = `Synced ${result.ordersSynced} orders`;
+    }
     SpreadsheetApp.getActiveSpreadsheet().toast(message, 'P/L', 5);
   } catch (err) {
     ui.alert('Sync failed', String((err && err.message) || err), ui.ButtonSet.OK);

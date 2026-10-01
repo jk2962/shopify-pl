@@ -35,6 +35,7 @@ const PROPS = {
   TOKEN: 'shopify_access_token',
   TOKEN_EXPIRES_AT: 'shopify_token_expires_at',
   LAST_SYNCED_AT: 'shopify_last_synced_at',
+  SHOP_TIMEZONE: 'shopify_shop_timezone',
   SYNC_STATE: 'shopify_sync_state',
   SYNC_TRIGGER_ID: 'shopify_sync_trigger_id',
 };
@@ -368,6 +369,7 @@ function runSyncPass(ss) {
 
   const shopTz = fetchShopTimezone(shop, token);
   ss.setSpreadsheetTimeZone(shopTz);
+  props.setProperty(PROPS.SHOP_TIMEZONE, shopTz);
 
   const accessScopes = fetchAccessScopes(shop, token);
   setReadAllOrdersBanner(ss, hasReadAllOrdersScope(accessScopes));

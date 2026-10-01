@@ -7,6 +7,8 @@ const {
   mergeOrdersById,
   isDemoOrderId,
   dropDemoOrders,
+  effectiveOrderTimeZone,
+  last30DaysRange,
 } = require('../src/sheet.js');
 
 test('dollarsToCents / centsToDollars round-trip', () => {
@@ -63,6 +65,18 @@ test('mergeOrdersById upserts by id: updates existing orders, appends new ones',
   assert.equal(byId.get('gid://shopify/Order/1').grossCents, 1000, 'untouched order is kept as-is');
   assert.equal(byId.get('gid://shopify/Order/2').grossCents, 2500, 'matching id is overwritten, not duplicated');
   assert.equal(byId.get('gid://shopify/Order/3').grossCents, 3000, 'new id is appended');
+});
+
+test('effectiveOrderTimeZone prefers the persisted shop timezone over the sheet display timezone', () => {
+  assert.equal(effectiveOrderTimeZone('America/New_York', 'America/Los_Angeles'), 'America/New_York');
+  assert.equal(effectiveOrderTimeZone(null, 'America/Los_Angeles'), 'America/Los_Angeles', 'falls back pre-first-sync');
+  assert.equal(effectiveOrderTimeZone('', 'America/Los_Angeles'), 'America/Los_Angeles');
+});
+
+test('last30DaysRange is a 30-day inclusive window ending today', () => {
+  const { start, end } = last30DaysRange(new Date('2026-06-30T12:00:00Z'));
+  assert.equal(end.toISOString().slice(0, 10), '2026-06-30');
+  assert.equal(start.toISOString().slice(0, 10), '2026-06-01');
 });
 
 test('isDemoOrderId recognizes demo-* ids only', () => {
