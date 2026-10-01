@@ -93,6 +93,20 @@ test('parseOrdersResponse throws, and flags THROTTLED errors for backoff-and-ret
   }
 });
 
+test('a THROTTLED error carries extensions.cost so the retry waits the real deficit', () => {
+  try {
+    shopify.parseOrdersResponse({
+      errors: [{ message: 'Throttled', extensions: { code: 'THROTTLED' } }],
+      extensions: {
+        cost: { requestedQueryCost: 300, throttleStatus: { currentlyAvailable: 100, restoreRate: 50 } },
+      },
+    });
+    assert.fail('expected parseOrdersResponse to throw');
+  } catch (err) {
+    assert.equal(shopify.computeBackoffMs(err.cost.throttleStatus, err.cost.requestedQueryCost), 4000);
+  }
+});
+
 test('isRefundListTruncated compares summed refunds against the order total', () => {
   const complete = {
     totalRefundedSet: { shopMoney: { amount: '15.00' } },

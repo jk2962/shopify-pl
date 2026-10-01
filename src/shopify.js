@@ -2,7 +2,7 @@
  * Shopify GraphQL Admin API: token handling, paginated/incremental order
  * sync with checkpoint/resume, cost-based throttling, and the
  * read_all_orders banner. Calls pl.js's normalizeOrder() and sheet.js's
- * upsertOrders()/setReadAllOrdersBanner()/recalculate() as bare globals
+ * upsertOrders()/setPlBanner()/recalculate() as bare globals
  * (Apps Script shares one global scope across files in a project).
  *
  * Verified against shopify.dev on 2026-09-30 for API version 2026-07
@@ -38,6 +38,7 @@ const PROPS = {
   SHOP_TIMEZONE: 'shopify_shop_timezone',
   SYNC_STATE: 'shopify_sync_state',
   SYNC_TRIGGER_ID: 'shopify_sync_trigger_id',
+  TAXES_INCLUDED_SEEN: 'shopify_taxes_included_seen',
 };
 
 // ---- Pure helpers (Node + Apps Script) ----
@@ -84,6 +85,10 @@ function parseOrdersResponse(json) {
     const throttled = json.errors.some((e) => e.extensions && e.extensions.code === 'THROTTLED');
     const err = new Error(json.errors.map((e) => e.message).join('; '));
     err.throttled = throttled;
+    // A THROTTLED response still carries extensions.cost; carry it onto the
+    // error so the retry can wait exactly the cost deficit (computeBackoffMs)
+    // instead of guessing at a fixed sleep.
+    err.cost = (json.extensions && json.extensions.cost) || null;
     throw err;
   }
   const conn = json.data.orders;
@@ -142,6 +147,7 @@ const ORDERS_QUERY = `
         test
         cancelledAt
         processedAt
+        taxesIncluded
         totalRefundedSet { shopMoney { amount } }
         lineItems(first: 100) {
           pageInfo { hasNextPage }
@@ -276,7 +282,17 @@ function graphqlRequest(shop, token, query, variables) {
     payload: JSON.stringify({ query, variables }),
     muteHttpExceptions: true,
   });
-  return JSON.parse(resp.getContentText());
+  // muteHttpExceptions means a 429/5xx arrives as a normal response, usually
+  // with a non-JSON body — parsing it blind surfaced as an opaque
+  // "SyntaxError: Unexpected token <" and abandoned the sync mid-page.
+  const code = resp.getResponseCode();
+  const body = resp.getContentText();
+  if (code !== 200) {
+    const err = new Error(`Shopify GraphQL HTTP ${code}: ${body.slice(0, 300)}`);
+    err.retryable = code === 429 || code === 430 || code >= 500;
+    throw err;
+  }
+  return JSON.parse(body);
 }
 
 function throwOnErrors(json) {
@@ -285,25 +301,36 @@ function throwOnErrors(json) {
   }
 }
 
+// Wait the cost deficit reported by extensions.cost when we have it; otherwise
+// a plain linear backoff for transient HTTP failures.
+function retrySleepMs(err, attempt) {
+  const cost = err.cost;
+  const deficitWait = cost ? computeBackoffMs(cost.throttleStatus, cost.requestedQueryCost) : 0;
+  return deficitWait > 0 ? deficitWait : 1000 * attempt;
+}
+
 function fetchOrdersPage(shop, token, first, after, queryFilter) {
   const MAX_ATTEMPTS = 5;
+  let lastErr;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const json = graphqlRequest(shop, token, ORDERS_QUERY, {
-      first,
-      after,
-      query: queryFilter,
-      sortKey: 'UPDATED_AT',
-    });
     try {
+      const json = graphqlRequest(shop, token, ORDERS_QUERY, {
+        first,
+        after,
+        query: queryFilter,
+        sortKey: 'UPDATED_AT',
+      });
       return parseOrdersResponse(json);
     } catch (err) {
-      if (err.throttled && attempt < MAX_ATTEMPTS) {
-        Utilities.sleep(1000 * attempt);
+      lastErr = err;
+      if ((err.throttled || err.retryable) && attempt < MAX_ATTEMPTS) {
+        Utilities.sleep(retrySleepMs(err, attempt));
         continue;
       }
       throw err;
     }
   }
+  throw lastErr;
 }
 
 function fetchAccessScopes(shop, token) {
@@ -372,14 +399,27 @@ function runSyncPass(ss) {
   props.setProperty(PROPS.SHOP_TIMEZONE, shopTz);
 
   const accessScopes = fetchAccessScopes(shop, token);
-  setReadAllOrdersBanner(ss, hasReadAllOrdersScope(accessScopes));
+  const hasReadAllOrders = hasReadAllOrdersScope(accessScopes);
 
   let state = loadSyncState(props);
   if (!state) {
     const lastSyncedAt = props.getProperty(PROPS.LAST_SYNCED_AT);
     const since = lastSyncedAt ? incrementalSinceIso(lastSyncedAt) : null;
-    state = { filter: ordersQueryFilter(since), cursor: null, pageSize: INITIAL_PAGE_SIZE };
+    // startedAt is pinned into the state so a sync that spans several
+    // executions still records its OWN start as the next incremental
+    // watermark. Using the final pass's start would mark orders changed during
+    // the earlier passes as already-synced and skip them next time.
+    if (!lastSyncedAt) props.deleteProperty(PROPS.TAXES_INCLUDED_SEEN);
+    state = {
+      filter: ordersQueryFilter(since),
+      cursor: null,
+      pageSize: INITIAL_PAGE_SIZE,
+      startedAt: new Date(startedAt).toISOString(),
+    };
   }
+
+  let taxesIncludedSeen = props.getProperty(PROPS.TAXES_INCLUDED_SEEN) === 'true';
+  setPlBanner(ss, hasReadAllOrders, taxesIncludedSeen);
 
   let ordersSynced = 0;
   let done = false;
@@ -394,6 +434,13 @@ function runSyncPass(ss) {
       const warnings = nestedTruncationWarnings(rawOrder);
       if (warnings.length) {
         Logger.log('Order ' + rawOrder.id + ' may have truncated: ' + warnings.join(', '));
+      }
+      // Every summed field is documented as tax-exclusive, but that was never
+      // verified against a tax-inclusive shop — so a counted order with
+      // taxesIncluded earns the caveat banner (SPEC.md "Other approved-as-
+      // written assumptions").
+      if (rawOrder.taxesIncluded === true && rawOrder.test === false && rawOrder.cancelledAt === null) {
+        taxesIncludedSeen = true;
       }
       return normalizeOrderCompat(rawOrder, shopTz);
     });
@@ -412,9 +459,14 @@ function runSyncPass(ss) {
     }
   }
 
+  if (taxesIncludedSeen && props.getProperty(PROPS.TAXES_INCLUDED_SEEN) !== 'true') {
+    props.setProperty(PROPS.TAXES_INCLUDED_SEEN, 'true');
+    setPlBanner(ss, hasReadAllOrders, true);
+  }
+
   if (done) {
     clearSyncState(props);
-    props.setProperty(PROPS.LAST_SYNCED_AT, new Date(startedAt).toISOString());
+    props.setProperty(PROPS.LAST_SYNCED_AT, state.startedAt || new Date(startedAt).toISOString());
     deleteContinuationTrigger(props);
   } else {
     scheduleContinuation(props);

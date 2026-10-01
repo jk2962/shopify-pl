@@ -9,6 +9,7 @@ const {
   dropDemoOrders,
   effectiveOrderTimeZone,
   last30DaysRange,
+  plBannerText,
 } = require('../src/sheet.js');
 
 test('dollarsToCents / centsToDollars round-trip', () => {
@@ -73,10 +74,24 @@ test('effectiveOrderTimeZone prefers the persisted shop timezone over the sheet 
   assert.equal(effectiveOrderTimeZone('', 'America/Los_Angeles'), 'America/Los_Angeles');
 });
 
-test('last30DaysRange is a 30-day inclusive window ending today', () => {
-  const { start, end } = last30DaysRange(new Date('2026-06-30T12:00:00Z'));
-  assert.equal(end.toISOString().slice(0, 10), '2026-06-30');
-  assert.equal(start.toISOString().slice(0, 10), '2026-06-01');
+test('last30DaysRange is a 30-day inclusive window ending on today local date', () => {
+  // Built from local date parts, not UTC: a UTC-midnight Date handed to
+  // Range.setValue() is converted using the script timezone and lands on the
+  // previous calendar day anywhere west of UTC, clipping today's orders off
+  // the Daily range.
+  const { start, end } = last30DaysRange(new Date(2026, 5, 30, 12, 0, 0));
+  assert.equal(end, '2026-06-30');
+  assert.equal(start, '2026-06-01');
+});
+
+test('plBannerText shows the 60-day and tax-inclusive caveats, together or not at all', () => {
+  assert.equal(plBannerText(true, false), '');
+  assert.match(plBannerText(false, false), /last 60 days/);
+  assert.match(plBannerText(true, true), /tax-inclusive/);
+
+  const both = plBannerText(false, true);
+  assert.match(both, /last 60 days/);
+  assert.match(both, /tax-inclusive/);
 });
 
 test('isDemoOrderId recognizes demo-* ids only', () => {

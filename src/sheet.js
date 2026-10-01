@@ -57,14 +57,19 @@ function toDateString(value, timeZone) {
   return String(value || '').trim();
 }
 
-// Orders must be bucketed by the Shopify store's timezone (spec), not whatever
-// the spreadsheet's own display timezone happens to be set to — those only
-// coincide because a sync pins ss's timezone to the shop's; an onEdit-triggered
-// recalculate (editing Settings/COGS/Expenses) has no such guarantee, and Sheets
-// auto-converts the written date strings into real Date values, so this is the
-// live bucketing path, not a rare fallback.
+// Fallback only, for Orders rows written before the Date column was pinned to
+// text (see writeOrders). Those are real Date values, and a Date out of a cell
+// carries no calendar date of its own, so it has to be re-formatted in some
+// timezone; the shop's is the better of the two, since a sync pins the
+// spreadsheet's timezone to the shop's. Rows written as text need none.
 function effectiveOrderTimeZone(persistedShopTimeZone, sheetTimeZone) {
   return persistedShopTimeZone || sheetTimeZone;
+}
+
+function localYmd(date) {
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
 }
 
 function clearRange(sheet, startRow, numCols, { formatsToo = false } = {}) {
@@ -77,10 +82,14 @@ function clearRange(sheet, startRow, numCols, { formatsToo = false } = {}) {
   }
 }
 
+// Returns yyyy-mm-dd strings, not Date objects. setValue(aDate) converts using
+// the SCRIPT timezone, so a UTC-midnight Date lands on the previous calendar
+// day everywhere west of UTC — which silently clipped today's orders off the
+// Daily default range and shifted the start a day early.
 function last30DaysRange(today) {
-  const end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-  const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 29));
-  return { start, end };
+  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 29);
+  return { start: localYmd(start), end: localYmd(end) };
 }
 
 function getOrCreateSheet(ss, name) {
@@ -211,6 +220,13 @@ function writeOrders(ss, orders) {
     JSON.stringify(o.lineItems),
     JSON.stringify(o.refunds),
   ]);
+  // Pin the Date column to text BEFORE writing: these are already shop-local
+  // calendar dates, and Sheets otherwise parses them into real Date values in
+  // the spreadsheet's timezone. Reading those back in the shop's timezone then
+  // shifts the day whenever the two differ (e.g. the owner changes the
+  // spreadsheet's timezone, or demo data is loaded before any sync), moving
+  // orders into the wrong P/L period.
+  sheet.getRange(ORDERS_DATA_START_ROW, 3, rows.length, 1).setNumberFormat('@');
   sheet.getRange(ORDERS_DATA_START_ROW, 1, rows.length, ORDERS_COLUMNS.length).setValues(rows);
 }
 
@@ -283,9 +299,9 @@ function ensurePlSheet(ss) {
     );
 
   const today = new Date();
-  const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 14, today.getUTCDate()));
-  sheet.getRange('D2').setValue(start).setNumberFormat('yyyy-mm-dd');
-  sheet.getRange('F2').setValue(today).setNumberFormat('yyyy-mm-dd');
+  const start = new Date(today.getFullYear(), today.getMonth() - 14, today.getDate());
+  sheet.getRange('D2').setValue(localYmd(start)).setNumberFormat('yyyy-mm-dd');
+  sheet.getRange('F2').setValue(localYmd(today)).setNumberFormat('yyyy-mm-dd');
 
   sheet.getRange(PL_HEADER_ROW, 1, 1, PL_COLUMNS.length).setValues([PL_COLUMNS]);
   sheet.getRange(PL_HEADER_ROW, 1, 1, PL_COLUMNS.length).setFontWeight('bold');
@@ -304,12 +320,22 @@ function ensurePlSheet(ss) {
 
 const READ_ALL_ORDERS_BANNER_TEXT =
   'Only the last 60 days of orders are available — yearly/older figures are incomplete.';
+const TAXES_INCLUDED_BANNER_TEXT =
+  'Some orders are tax-inclusive — the "taxes excluded" figures are unverified for those orders.';
 
-function setReadAllOrdersBanner(ss, hasReadAllOrders) {
+function plBannerText(hasReadAllOrders, taxesIncludedSeen) {
+  const messages = [];
+  if (!hasReadAllOrders) messages.push(READ_ALL_ORDERS_BANNER_TEXT);
+  if (taxesIncludedSeen) messages.push(TAXES_INCLUDED_BANNER_TEXT);
+  return messages.join(' ');
+}
+
+function setPlBanner(ss, hasReadAllOrders, taxesIncludedSeen) {
   const sheet = ensurePlSheet(ss);
   sheet.getRange(PL_BANNER_ROW, 1, 1, PL_COLUMNS.length).breakApart();
 
-  if (hasReadAllOrders) {
+  const text = plBannerText(hasReadAllOrders, taxesIncludedSeen === true);
+  if (!text) {
     const range = sheet.getRange(PL_BANNER_ROW, 1, 1, PL_COLUMNS.length);
     range.clearContent();
     range.setBackground(null).setFontColor(null).setFontWeight('normal');
@@ -321,7 +347,7 @@ function setReadAllOrdersBanner(ss, hasReadAllOrders) {
   // of it applies to a stale pre-merge reference; a generous row height and
   // center/middle alignment keep the wrapped white-on-red text fully visible.
   const range = sheet.getRange(PL_BANNER_ROW, 1, 1, PL_COLUMNS.length).merge();
-  range.setValue(READ_ALL_ORDERS_BANNER_TEXT);
+  range.setValue(text);
   range
     .setBackground('#CC0000')
     .setFontColor('#FFFFFF')
@@ -541,5 +567,6 @@ if (typeof module !== 'undefined') {
     dropDemoOrders,
     effectiveOrderTimeZone,
     last30DaysRange,
+    plBannerText,
   };
 }

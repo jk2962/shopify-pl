@@ -19,14 +19,19 @@ function moneyBagCents(bag) {
   return centsFromAmount(bag.shopMoney.amount);
 }
 
+// Assembled from formatToParts rather than trusting a locale ('en-CA') to emit
+// YYYY-MM-DD: part order and separators are locale/ICU-data dependent, and
+// Apps Script's ICU is not Node's. A silent flip to MM/DD/YYYY here would
+// misbucket every row in the P/L while the Node tests stayed green.
 function shopLocalDate(isoString, timeZone) {
-  const formatter = new Intl.DateTimeFormat('en-CA', {
+  const parts = new Intl.DateTimeFormat('en-US', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  });
-  return formatter.format(new Date(isoString));
+  }).formatToParts(new Date(isoString));
+  const part = (type) => parts.find((p) => p.type === type).value;
+  return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
 function addDaysUTC(dateStr, days) {
