@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { buildDemoOrders, dollarsToCents, centsToDollars } = require('../src/sheet.js');
+const { buildDemoOrders, dollarsToCents, centsToDollars, mergeOrdersById } = require('../src/sheet.js');
 
 test('dollarsToCents / centsToDollars round-trip', () => {
   assert.equal(dollarsToCents('2.50'), 250);
@@ -37,4 +37,23 @@ test('buildDemoOrders produces ~120 realistic orders', () => {
   assert.ok(skus.size >= 3, 'expected several distinct SKUs');
   assert.ok(refundCount >= 1, 'expected at least one partial refund');
   assert.ok(discountCount >= 1, 'expected at least one discounted order');
+});
+
+test('mergeOrdersById upserts by id: updates existing orders, appends new ones', () => {
+  const existing = [
+    { id: 'gid://shopify/Order/1', name: '#1000', grossCents: 1000 },
+    { id: 'gid://shopify/Order/2', name: '#1001', grossCents: 2000 },
+  ];
+  const incoming = [
+    { id: 'gid://shopify/Order/2', name: '#1001', grossCents: 2500 },
+    { id: 'gid://shopify/Order/3', name: '#1002', grossCents: 3000 },
+  ];
+
+  const merged = mergeOrdersById(existing, incoming);
+
+  assert.equal(merged.length, 3);
+  const byId = new Map(merged.map((o) => [o.id, o]));
+  assert.equal(byId.get('gid://shopify/Order/1').grossCents, 1000, 'untouched order is kept as-is');
+  assert.equal(byId.get('gid://shopify/Order/2').grossCents, 2500, 'matching id is overwritten, not duplicated');
+  assert.equal(byId.get('gid://shopify/Order/3').grossCents, 3000, 'new id is appended');
 });

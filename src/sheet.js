@@ -14,6 +14,7 @@ const SHEETS = {
 };
 
 const PL_CONTROLS_ROW = 2;
+const PL_BANNER_ROW = 3;
 const PL_HEADER_ROW = 4;
 const PL_DATA_START_ROW = 5;
 const ORDERS_HEADER_ROW = 2;
@@ -204,6 +205,8 @@ function readOrders(ss) {
         id,
         name,
         date: toDateString(date, tz),
+        test: test === true,
+        cancelled: cancelled === true,
         counted: test === false && cancelled === false,
         units: Number(units),
         grossCents: dollarsToCents(gross),
@@ -213,6 +216,18 @@ function readOrders(ss) {
         refunds: refundsJson ? JSON.parse(refundsJson) : [],
       };
     });
+}
+
+function mergeOrdersById(existingOrders, incomingOrders) {
+  const byId = new Map();
+  for (const order of existingOrders) byId.set(order.id, order);
+  for (const order of incomingOrders) byId.set(order.id, order);
+  return Array.from(byId.values());
+}
+
+function upsertOrders(ss, incomingOrders) {
+  const merged = mergeOrdersById(readOrders(ss), incomingOrders);
+  writeOrders(ss, merged);
 }
 
 // ---- P/L ----
@@ -251,6 +266,24 @@ function ensurePlSheet(ss) {
 
   sheet.autoResizeColumns(1, PL_COLUMNS.length);
   return sheet;
+}
+
+const READ_ALL_ORDERS_BANNER_TEXT =
+  'Only the last 60 days of orders are available — yearly/older figures are incomplete.';
+
+function setReadAllOrdersBanner(ss, hasReadAllOrders) {
+  const sheet = ensurePlSheet(ss);
+  const range = sheet.getRange(PL_BANNER_ROW, 1, 1, PL_COLUMNS.length);
+  if (hasReadAllOrders) {
+    range.breakApart();
+    range.clearContent();
+    range.setBackground(null);
+    return;
+  }
+  range.breakApart();
+  sheet.getRange(PL_BANNER_ROW, 1, 1, PL_COLUMNS.length).merge();
+  sheet.getRange(PL_BANNER_ROW, 1).setValue(READ_ALL_ORDERS_BANNER_TEXT);
+  range.setBackground('#CC0000').setFontColor('#FFFFFF').setFontWeight('bold').setWrap(true);
 }
 
 function readPlControls(ss) {
@@ -433,5 +466,5 @@ function loadDemoData(ss) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { buildDemoOrders, dollarsToCents, centsToDollars };
+  module.exports = { buildDemoOrders, dollarsToCents, centsToDollars, mergeOrdersById };
 }

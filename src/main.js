@@ -1,5 +1,6 @@
 /*
- * Entry points only — logic lives in sheet.js (and pl.js for pure P/L math).
+ * Entry points only — logic lives in sheet.js (pl.js for pure P/L math,
+ * shopify.js for sync).
  */
 
 function onOpen() {
@@ -15,7 +16,16 @@ function onOpen() {
 }
 
 function syncNow() {
-  SpreadsheetApp.getUi().alert('Not connected yet');
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const result = runSync(SpreadsheetApp.getActive());
+    const message = result.done
+      ? `Sync complete — ${result.ordersSynced} orders updated this pass`
+      : `Syncing — ${result.ordersSynced} orders so far, continuing automatically…`;
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, 'P/L', 5);
+  } catch (err) {
+    ui.alert('Sync failed', String((err && err.message) || err), ui.ButtonSet.OK);
+  }
 }
 
 function recalculateMenu() {
@@ -36,9 +46,9 @@ function loadDemoDataMenu() {
 }
 
 function setCredentialsMenu() {
-  SpreadsheetApp.getUi().alert('Set credentials is not available yet — coming with Shopify sync.');
+  saveShopifyCredentials();
 }
 
 function enableHourlySyncMenu() {
-  SpreadsheetApp.getUi().alert('Enable hourly sync is not available yet — coming with Shopify sync.');
+  enableHourlySync();
 }

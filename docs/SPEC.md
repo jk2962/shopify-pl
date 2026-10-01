@@ -120,3 +120,9 @@ Incremental sync queries `updated_at:>` (last sync time − 10 minutes), not the
 - Single shop currency: only `shopMoney` read everywhere; `presentmentMoney` unused.
 - Shipping cost (the owner's cost, from Settings) uses units/orders **sold**, never reversed on refund, per spec.
 - Auth flow (Dev Dashboard client-credentials grant) remains unverified until step 4 — not guessed at, not started.
+
+### Auth flow (confirmed in step 4, re-verified 2026-09-30 — API version still 2026-07; 2026-10 is release-candidate only)
+`POST https://{shop}.myshopify.com/admin/oauth/access_token`, `Content-Type: application/x-www-form-urlencoded`, body `grant_type=client_credentials&client_id=...&client_secret=...`. Response: `access_token`, `scope`, `expires_in` (always `86399`, i.e. 24h — no refresh token, just request a new one). Works when the app and the store belong to the same Shopify organization (true for a dev store created under your own org). GraphQL calls use `X-Shopify-Access-Token: {access_token}` against `https://{shop}.myshopify.com/admin/api/2026-07/graphql.json`.
+
+### Orders query must explicitly pass `status:any`
+The `orders` connection's query syntax takes the same search DSL as `status:open|closed|cancelled|not_closed`; cancelled/closed orders are not guaranteed to come back without an explicit `status:any` term (needed since the spec requires syncing and flagging cancelled orders, not silently dropping them). Combined with the incremental filter as `status:any updated_at:>'2026-06-01T00:00:00.000Z'` (quoted ISO 8601, implicit AND).
