@@ -1,4 +1,5 @@
 node_modules
 .clasprc.json
+.clasp.json
 .env*
 .DS_Store

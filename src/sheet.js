@@ -1,0 +1,591 @@
+/*
+ * Reads Settings/COGS/Other Expenses, reads/writes Orders, writes P/L.
+ * Calls pl.js's computeRows() as a bare global (Apps Script shares one
+ * global scope across files in a project — no require/import there).
+ * No Shopify calls here; recalculate() only ever reads the Orders tab.
+ */
+
+const SHEETS = {
+  SETTINGS: 'Settings',
+  COGS: 'COGS by SKU',
+  EXPENSES: 'Other Expenses',
+  ORDERS: 'Orders',
+  PL: 'P/L',
+};
+
+const PL_CONTROLS_ROW = 2;
+const PL_BANNER_ROW = 3;
+const PL_HEADER_ROW = 4;
+const PL_DATA_START_ROW = 5;
+const ORDERS_HEADER_ROW = 2;
+const ORDERS_DATA_START_ROW = 3;
+
+const PL_COLUMNS = [
+  'Period', 'Orders', 'Units', 'Gross sales', 'Discounts', 'Returns', 'Net sales',
+  'Shipping charged', 'COGS', 'Shipping cost', 'Payment fees', 'Other expenses',
+  'Net profit', 'Margin %', 'AOV',
+];
+const NET_PROFIT_COL = 13;
+
+const ORDERS_COLUMNS = [
+  'Order ID', 'Name', 'Date', 'Test', 'Cancelled', 'Units', 'Gross Sales',
+  'Discounts', 'Shipping Charged', 'Line Items (JSON)', 'Refunds (JSON)',
+];
+
+const SHOP_TIMEZONE_PROP = 'shopify_shop_timezone';
+
+// pl.js via require in Node; its bare globals (shared Apps Script scope) otherwise.
+// eslint-disable-next-line no-var
+var pl = typeof require !== 'undefined' ? require('./pl.js') : null;
+
+const PL_NOTE =
+  'How numbers are calculated: bucketed by the connected Shopify store’s timezone, weeks start Monday. ' +
+  'Cancelled and test orders are excluded. Taxes are excluded throughout. Refunds are dated ' +
+  'to the refund, not the original order. COGS = units × per-SKU cost (falls back to the ' +
+  'Settings default); refunded units reverse COGS on the refund date. ' +
+  'Margin % = Net profit ÷ (Net sales + Shipping charged).';
+
+function dollarsToCents(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
+
+function centsToDollars(cents) {
+  return Math.round(cents) / 100;
+}
+
+function toDateString(value, timeZone) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, timeZone, 'yyyy-MM-dd');
+  }
+  return String(value || '').trim();
+}
+
+// Fallback only, for Orders rows written before the Date column was pinned to
+// text (see writeOrders). Those are real Date values, and a Date out of a cell
+// carries no calendar date of its own, so it has to be re-formatted in some
+// timezone; the shop's is the better of the two, since a sync pins the
+// spreadsheet's timezone to the shop's. Rows written as text need none.
+function effectiveOrderTimeZone(persistedShopTimeZone, sheetTimeZone) {
+  return persistedShopTimeZone || sheetTimeZone;
+}
+
+function localYmd(date) {
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function clearRange(sheet, startRow, numCols, { formatsToo = false } = {}) {
+  const lastRow = Math.max(sheet.getMaxRows(), startRow);
+  const range = sheet.getRange(startRow, 1, lastRow - startRow + 1, numCols);
+  if (formatsToo) {
+    range.clear(); // content + number formats + bold, etc. — not sheet-level conditional rules
+  } else {
+    range.clearContent();
+  }
+}
+
+// "Today" as a yyyy-mm-dd date in the shop's timezone. Before the first sync
+// (e.g. demo data) no shop timezone is stored yet, so fall back to the
+// script's own timezone.
+function todayYmd(now, shopTimeZone) {
+  if (!shopTimeZone) return localYmd(now);
+  const iso = now.toISOString();
+  return pl ? pl.shopLocalDate(iso, shopTimeZone) : shopLocalDate(iso, shopTimeZone);
+}
+
+function shiftYmd(ymdStr, months, days) {
+  const [y, m, d] = ymdStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1 + months, d + days)).toISOString().slice(0, 10);
+}
+
+// Returns yyyy-mm-dd strings, not Date objects. Sheets displays a Date value in
+// the spreadsheet's timezone, so a UTC-midnight Date showed as the previous
+// calendar day anywhere west of UTC — which clipped today's orders off the
+// Daily default range and shifted the start a day early.
+function last30DaysRange(now, shopTimeZone) {
+  const end = todayYmd(now, shopTimeZone);
+  return { start: shiftYmd(end, 0, -29), end };
+}
+
+function getOrCreateSheet(ss, name) {
+  return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
+// ---- Settings ----
+
+function ensureSettingsSheet(ss) {
+  const sheet = getOrCreateSheet(ss, SHEETS.SETTINGS);
+  if (sheet.getRange('A1').getValue() === 'Setting') return sheet;
+  sheet.clear();
+  sheet.getRange('A1:C1').setValues([['Setting', 'Value', 'Notes']]);
+  sheet.getRange('A2:C6').setValues([
+    ['Default COGS per unit', 1.0, ''],
+    ['Shipping cost', 5.0, ''],
+    ['Shipping cost mode', 'per order', 'per order or per unit'],
+    ['Payment fee %', 2.9, 'estimate, edit to match your plan'],
+    ['Payment fee fixed per order', 0.3, 'estimate, edit to match your plan'],
+  ]);
+  sheet
+    .getRange('B4')
+    .setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['per order', 'per unit'], true).build());
+  sheet.getRange('A1:A6').setFontWeight('bold');
+  sheet.autoResizeColumns(1, 3);
+  return sheet;
+}
+
+function readSettings(ss) {
+  const sheet = ss.getSheetByName(SHEETS.SETTINGS);
+  const [cogs, shipRate, shipMode, feePctPercent, feeFixed] = sheet
+    .getRange('B2:B6')
+    .getValues()
+    .map((r) => r[0]);
+  return {
+    defaultCostCents: dollarsToCents(cogs),
+    shippingRateCents: dollarsToCents(shipRate),
+    shippingMode: String(shipMode).trim() === 'per unit' ? 'per_unit' : 'per_order',
+    feePct: Number(feePctPercent) / 100,
+    feeFixedCents: dollarsToCents(feeFixed),
+  };
+}
+
+// ---- COGS by SKU ----
+
+function ensureCogsSheet(ss) {
+  const sheet = getOrCreateSheet(ss, SHEETS.COGS);
+  if (sheet.getRange('A1').getValue() === 'SKU') return sheet;
+  sheet.clear();
+  sheet.getRange('A1:C1').setValues([['SKU', 'Cost per unit', 'Notes']]);
+  sheet.getRange('C2').setValue('Blank cost = use the Settings default');
+  sheet.getRange('A1:C1').setFontWeight('bold');
+  sheet.autoResizeColumns(1, 3);
+  return sheet;
+}
+
+function readCogsOverrides(ss) {
+  const sheet = ss.getSheetByName(SHEETS.COGS);
+  const lastRow = sheet.getLastRow();
+  const overrides = {};
+  if (lastRow < 2) return overrides;
+  const values = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  for (const [sku, cost] of values) {
+    if (!sku || cost === '' || cost === null) continue;
+    overrides[String(sku).trim()] = dollarsToCents(cost);
+  }
+  return overrides;
+}
+
+// ---- Other Expenses ----
+
+function ensureExpensesSheet(ss) {
+  const sheet = getOrCreateSheet(ss, SHEETS.EXPENSES);
+  if (sheet.getRange('A1').getValue() === 'Date') return sheet;
+  sheet.clear();
+  sheet.getRange('A1:C1').setValues([['Date', 'Category', 'Amount']]);
+  sheet.getRange('A1:C1').setFontWeight('bold');
+  sheet.getRange('A2:A1000').setNumberFormat('yyyy-mm-dd');
+  sheet.autoResizeColumns(1, 3);
+  return sheet;
+}
+
+function readExpenses(ss) {
+  const sheet = ss.getSheetByName(SHEETS.EXPENSES);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  const tz = ss.getSpreadsheetTimeZone();
+  const values = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+  const expenses = [];
+  for (const [date, category, amount] of values) {
+    if (!date || amount === '' || amount === null) continue;
+    expenses.push({
+      date: toDateString(date, tz),
+      category: String(category || ''),
+      amountCents: dollarsToCents(amount),
+    });
+  }
+  return expenses;
+}
+
+// ---- Orders ----
+
+function ensureOrdersSheet(ss) {
+  const sheet = getOrCreateSheet(ss, SHEETS.ORDERS);
+  if (sheet.getRange('A1').getValue() === 'Script-managed — do not edit') return sheet;
+  sheet.clear();
+  sheet.getRange('A1').setValue('Script-managed — do not edit');
+  sheet.getRange(ORDERS_HEADER_ROW, 1, 1, ORDERS_COLUMNS.length).setValues([ORDERS_COLUMNS]);
+  sheet.getRange(ORDERS_HEADER_ROW, 1, 1, ORDERS_COLUMNS.length).setFontWeight('bold');
+  sheet.autoResizeColumns(1, ORDERS_COLUMNS.length);
+  return sheet;
+}
+
+function writeOrders(ss, orders) {
+  const sheet = ensureOrdersSheet(ss);
+  clearRange(sheet, ORDERS_DATA_START_ROW, ORDERS_COLUMNS.length);
+  if (orders.length === 0) return;
+  const rows = orders.map((o) => [
+    o.id,
+    o.name,
+    o.date,
+    o.test,
+    o.cancelled,
+    o.units,
+    centsToDollars(o.grossCents),
+    centsToDollars(o.discountCents),
+    centsToDollars(o.shippingChargedCents),
+    JSON.stringify(o.lineItems),
+    JSON.stringify(o.refunds),
+  ]);
+  // Pin the Date column to text BEFORE writing: these are already shop-local
+  // calendar dates, and Sheets otherwise parses them into real Date values in
+  // the spreadsheet's timezone. Reading those back in the shop's timezone then
+  // shifts the day whenever the two differ (e.g. the owner changes the
+  // spreadsheet's timezone, or demo data is loaded before any sync), moving
+  // orders into the wrong P/L period.
+  sheet.getRange(ORDERS_DATA_START_ROW, 3, rows.length, 1).setNumberFormat('@');
+  sheet.getRange(ORDERS_DATA_START_ROW, 1, rows.length, ORDERS_COLUMNS.length).setValues(rows);
+}
+
+function readOrders(ss) {
+  const sheet = ss.getSheetByName(SHEETS.ORDERS);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < ORDERS_DATA_START_ROW) return [];
+  const persistedShopTimeZone = PropertiesService.getScriptProperties().getProperty(SHOP_TIMEZONE_PROP);
+  const tz = effectiveOrderTimeZone(persistedShopTimeZone, ss.getSpreadsheetTimeZone());
+  const values = sheet.getRange(ORDERS_DATA_START_ROW, 1, lastRow - ORDERS_DATA_START_ROW + 1, ORDERS_COLUMNS.length).getValues();
+  return values
+    .filter((row) => row[0])
+    .map((row) => {
+      const [id, name, date, test, cancelled, units, gross, discounts, shippingCharged, lineItemsJson, refundsJson] = row;
+      return {
+        id,
+        name,
+        date: toDateString(date, tz),
+        test: test === true,
+        cancelled: cancelled === true,
+        counted: test === false && cancelled === false,
+        units: Number(units),
+        grossCents: dollarsToCents(gross),
+        discountCents: dollarsToCents(discounts),
+        shippingChargedCents: dollarsToCents(shippingCharged),
+        lineItems: lineItemsJson ? JSON.parse(lineItemsJson) : [],
+        refunds: refundsJson ? JSON.parse(refundsJson) : [],
+      };
+    });
+}
+
+function isDemoOrderId(id) {
+  return typeof id === 'string' && id.startsWith('demo-');
+}
+
+// A real sync must never leave demo rows mixed in with synced orders.
+function dropDemoOrders(orders) {
+  return orders.filter((o) => !isDemoOrderId(o.id));
+}
+
+function mergeOrdersById(existingOrders, incomingOrders) {
+  const byId = new Map();
+  for (const order of existingOrders) byId.set(order.id, order);
+  for (const order of incomingOrders) byId.set(order.id, order);
+  return Array.from(byId.values());
+}
+
+function upsertOrders(ss, incomingOrders) {
+  const merged = mergeOrdersById(dropDemoOrders(readOrders(ss)), incomingOrders);
+  writeOrders(ss, merged);
+}
+
+// ---- P/L ----
+
+function ensurePlSheet(ss) {
+  const sheet = getOrCreateSheet(ss, SHEETS.PL);
+  if (sheet.getRange('A1').getValue() === PL_NOTE) return sheet;
+  sheet.clear();
+  sheet.getRange('A1').setValue(PL_NOTE);
+  sheet.getRange('A1:O1').merge().setWrap(true).setFontStyle('italic');
+
+  sheet.getRange('A2:F2').setValues([['Timeframe', 'Monthly', 'Start date', '', 'End date', '']]);
+  sheet.getRange('A2').setFontWeight('bold');
+  sheet.getRange('C2').setFontWeight('bold');
+  sheet.getRange('E2').setFontWeight('bold');
+  sheet
+    .getRange('B2')
+    .setDataValidation(
+      SpreadsheetApp.newDataValidation().requireValueInList(['Daily', 'Weekly', 'Monthly', 'Yearly'], true).build()
+    );
+
+  const today = todayYmd(new Date(), PropertiesService.getScriptProperties().getProperty(SHOP_TIMEZONE_PROP));
+  sheet.getRange('D2').setValue(shiftYmd(today, -14, 0)).setNumberFormat('yyyy-mm-dd');
+  sheet.getRange('F2').setValue(today).setNumberFormat('yyyy-mm-dd');
+
+  sheet.getRange(PL_HEADER_ROW, 1, 1, PL_COLUMNS.length).setValues([PL_COLUMNS]);
+  sheet.getRange(PL_HEADER_ROW, 1, 1, PL_COLUMNS.length).setFontWeight('bold');
+
+  const negativeProfitRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberLessThan(0)
+    .setFontColor('#CC0000')
+    .setRanges([sheet.getRange(PL_DATA_START_ROW, NET_PROFIT_COL, 1000, 1)])
+    .build();
+  sheet.setConditionalFormatRules([negativeProfitRule]);
+
+  sheet.autoResizeColumns(1, PL_COLUMNS.length);
+  if (sheet.getColumnWidth(1) < 110) sheet.setColumnWidth(1, 110); // fit "Week of YYYY-MM-DD" labels
+  return sheet;
+}
+
+const READ_ALL_ORDERS_BANNER_TEXT =
+  'Only the last 60 days of orders are available — yearly/older figures are incomplete.';
+const TAXES_INCLUDED_BANNER_TEXT =
+  'Some orders are tax-inclusive — the "taxes excluded" figures are unverified for those orders.';
+
+function plBannerText(hasReadAllOrders, taxesIncludedSeen) {
+  const messages = [];
+  if (!hasReadAllOrders) messages.push(READ_ALL_ORDERS_BANNER_TEXT);
+  if (taxesIncludedSeen) messages.push(TAXES_INCLUDED_BANNER_TEXT);
+  return messages.join(' ');
+}
+
+function setPlBanner(ss, hasReadAllOrders, taxesIncludedSeen) {
+  const sheet = ensurePlSheet(ss);
+  sheet.getRange(PL_BANNER_ROW, 1, 1, PL_COLUMNS.length).breakApart();
+
+  const text = plBannerText(hasReadAllOrders, taxesIncludedSeen === true);
+  if (!text) {
+    const range = sheet.getRange(PL_BANNER_ROW, 1, 1, PL_COLUMNS.length);
+    range.clearContent();
+    range.setBackground(null).setFontColor(null).setFontWeight('normal');
+    sheet.setRowHeight(PL_BANNER_ROW, 21);
+    return;
+  }
+
+  // Merge first, then set value/format on the resulting (merged) range so none
+  // of it applies to a stale pre-merge reference; a generous row height and
+  // center/middle alignment keep the wrapped white-on-red text fully visible.
+  const range = sheet.getRange(PL_BANNER_ROW, 1, 1, PL_COLUMNS.length).merge();
+  range.setValue(text);
+  range
+    .setBackground('#CC0000')
+    .setFontColor('#FFFFFF')
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle')
+    .setWrap(true);
+  sheet.setRowHeight(PL_BANNER_ROW, 42);
+}
+
+function readPlControls(ss) {
+  const sheet = ss.getSheetByName(SHEETS.PL);
+  const tz = ss.getSpreadsheetTimeZone();
+  return {
+    timeframe: String(sheet.getRange('B2').getValue() || 'Monthly').toLowerCase(),
+    startDate: toDateString(sheet.getRange('D2').getValue(), tz),
+    endDate: toDateString(sheet.getRange('F2').getValue(), tz),
+  };
+}
+
+function plRowToValues(row) {
+  return [
+    row.label,
+    row.orders,
+    row.units,
+    centsToDollars(row.grossSalesCents),
+    centsToDollars(row.discountsCents),
+    centsToDollars(row.returnsCents),
+    centsToDollars(row.netSalesCents),
+    centsToDollars(row.shippingChargedCents),
+    centsToDollars(row.cogsCents),
+    centsToDollars(row.shippingCostCents),
+    centsToDollars(row.paymentFeesCents),
+    centsToDollars(row.otherExpensesCents),
+    centsToDollars(row.netProfitCents),
+    row.marginPct === null ? '' : row.marginPct,
+    row.aovCents === null ? '' : centsToDollars(row.aovCents),
+  ];
+}
+
+function writePlRows(ss, rows, totals) {
+  const sheet = ss.getSheetByName(SHEETS.PL);
+  // Clear formats too: switching timeframe (e.g. Monthly -> Daily) can leave
+  // fewer rows than before, so a shorter render must still wipe the old
+  // rows' leftover date format and the old Totals row's bold formatting.
+  clearRange(sheet, PL_DATA_START_ROW, PL_COLUMNS.length, { formatsToo: true });
+
+  const values = rows.map(plRowToValues);
+  values.push(plRowToValues(totals));
+
+  // Must be set before writing values — Sheets otherwise auto-converts period
+  // labels like "2025-08" or "2026" into real dates (showing e.g. "2025-8").
+  sheet.getRange(PL_DATA_START_ROW, 1, values.length, 1).setNumberFormat('@');
+
+  sheet.getRange(PL_DATA_START_ROW, 1, values.length, PL_COLUMNS.length).setValues(values);
+
+  const moneyCols = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15];
+  for (const col of moneyCols) {
+    sheet.getRange(PL_DATA_START_ROW, col, values.length, 1).setNumberFormat('$#,##0.00');
+  }
+  sheet.getRange(PL_DATA_START_ROW, 14, values.length, 1).setNumberFormat('0.0%');
+
+  const totalsRow = PL_DATA_START_ROW + values.length - 1;
+  sheet.getRange(totalsRow, 1, 1, PL_COLUMNS.length).setFontWeight('bold');
+
+  sheet.autoResizeColumns(1, PL_COLUMNS.length); // columns were sized before any data existed; AOV etc. need re-sizing
+}
+
+// ---- Orchestration ----
+
+function ensureSheets(ss) {
+  ensureSettingsSheet(ss);
+  ensureCogsSheet(ss);
+  ensureExpensesSheet(ss);
+  ensureOrdersSheet(ss);
+  ensurePlSheet(ss);
+  return ss;
+}
+
+function recalculate(ss) {
+  ensureSheets(ss);
+  const settings = readSettings(ss);
+  const costBySku = readCogsOverrides(ss);
+  const otherExpenses = readExpenses(ss);
+  const orders = readOrders(ss);
+  const controls = readPlControls(ss);
+
+  const { rows, totals } = computeRows(orders, {
+    timeframe: controls.timeframe,
+    startDate: controls.startDate,
+    endDate: controls.endDate,
+    costBySku,
+    defaultCostCents: settings.defaultCostCents,
+    shippingMode: settings.shippingMode,
+    shippingRateCents: settings.shippingRateCents,
+    feePct: settings.feePct,
+    feeFixedCents: settings.feeFixedCents,
+    otherExpenses,
+  });
+
+  writePlRows(ss, rows, totals);
+}
+
+function maybeDefaultDailyRange(sheet, range) {
+  const isTimeframeCell = range.getRow() === PL_CONTROLS_ROW && range.getColumn() === 2;
+  if (!isTimeframeCell) return;
+  if (String(range.getValue() || '').trim().toLowerCase() !== 'daily') return;
+  const { start, end } = last30DaysRange(
+    new Date(),
+    PropertiesService.getScriptProperties().getProperty(SHOP_TIMEZONE_PROP)
+  );
+  sheet.getRange('D2').setValue(start).setNumberFormat('yyyy-mm-dd');
+  sheet.getRange('F2').setValue(end).setNumberFormat('yyyy-mm-dd');
+}
+
+function onEdit(e) {
+  if (!e || !e.range) return;
+  const sheet = e.range.getSheet();
+  const sheetName = sheet.getName();
+  const isPlControlEdit = sheetName === SHEETS.PL && e.range.getRow() === PL_CONTROLS_ROW;
+  const watched = sheetName === SHEETS.SETTINGS || sheetName === SHEETS.COGS || sheetName === SHEETS.EXPENSES;
+  if (!watched && !isPlControlEdit) return;
+  if (isPlControlEdit) maybeDefaultDailyRange(sheet, e.range);
+  recalculate(sheet.getParent());
+}
+
+// ---- Demo data ----
+
+const DEMO_SKUS = [
+  { sku: 'TSHIRT-BLK-M', priceCents: 2500 },
+  { sku: 'TSHIRT-BLK-L', priceCents: 2500 },
+  { sku: 'HOODIE-GRY-M', priceCents: 5500 },
+  { sku: 'CAP-NAVY', priceCents: 1800 },
+  { sku: 'TOTE-CANVAS', priceCents: 1200 },
+];
+
+function demoIsoDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function demoAddDays(date, days) {
+  const d = new Date(date.getTime());
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
+function buildDemoOrders() {
+  const totalOrders = 120;
+  const today = new Date();
+  const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 14, today.getUTCDate()));
+  const spanDays = Math.round((today.getTime() - start.getTime()) / 86400000);
+  const cancelledIndex = 13;
+  const testIndex = 47;
+
+  const orders = [];
+  for (let i = 0; i < totalOrders; i++) {
+    const dayOffset = Math.floor((i / (totalOrders - 1)) * spanDays);
+    const orderDate = demoAddDays(start, dayOffset);
+    const skuCount = 1 + (i % 3);
+    const lineItems = [];
+    let grossCents = 0;
+    let units = 0;
+    for (let li = 0; li < skuCount; li++) {
+      const pick = DEMO_SKUS[(i + li) % DEMO_SKUS.length];
+      const qty = 1 + ((i + li) % 3);
+      lineItems.push({ sku: pick.sku, quantity: qty, unitPriceCents: pick.priceCents });
+      grossCents += pick.priceCents * qty;
+      units += qty;
+    }
+
+    let discountCents = 0;
+    if (i % 5 === 0) {
+      discountCents = Math.round(lineItems[0].unitPriceCents * lineItems[0].quantity * 0.1);
+    }
+
+    const shippingChargedCents = i % 10 === 0 ? 0 : 500;
+
+    const refunds = [];
+    if (i % 20 === 7 && i !== cancelledIndex && i !== testIndex) {
+      const refundLine = lineItems[0];
+      refunds.push({
+        date: demoIsoDate(demoAddDays(orderDate, 21)),
+        merchandiseCents: refundLine.unitPriceCents,
+        shippingCents: 0,
+        discretionaryCents: 0,
+        lineItems: [{ sku: refundLine.sku, quantity: 1 }],
+      });
+    }
+
+    orders.push({
+      id: `demo-${i + 1}`,
+      name: `#${1000 + i}`,
+      date: demoIsoDate(orderDate),
+      test: i === testIndex,
+      cancelled: i === cancelledIndex,
+      units,
+      grossCents,
+      discountCents,
+      shippingChargedCents,
+      lineItems,
+      refunds,
+    });
+  }
+  return orders;
+}
+
+function loadDemoData(ss) {
+  ensureSheets(ss);
+  writeOrders(ss, buildDemoOrders());
+  recalculate(ss);
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = {
+    buildDemoOrders,
+    dollarsToCents,
+    centsToDollars,
+    mergeOrdersById,
+    isDemoOrderId,
+    dropDemoOrders,
+    effectiveOrderTimeZone,
+    last30DaysRange,
+    plBannerText,
+  };
+}

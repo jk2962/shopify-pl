@@ -1,0 +1,79 @@
+{
+  "data": {
+    "orders": {
+      "nodes": [
+        {
+          "id": "gid://shopify/Order/5551010",
+          "name": "#1010",
+          "test": false,
+          "cancelledAt": null,
+          "processedAt": "2026-06-16T10:00:00Z",
+          "totalRefundedSet": { "shopMoney": { "amount": "15.00" } },
+          "lineItems": {
+            "pageInfo": { "hasNextPage": false },
+            "nodes": [
+              {
+                "sku": "MUG-01",
+                "quantity": 2,
+                "originalUnitPriceSet": { "shopMoney": { "amount": "15.00" } },
+                "discountAllocations": []
+              }
+            ]
+          },
+          "shippingLines": {
+            "pageInfo": { "hasNextPage": false },
+            "nodes": [{ "discountedPriceSet": { "shopMoney": { "amount": "5.00" } } }]
+          },
+          "refunds": [
+            {
+              "processedAt": "2026-06-18T09:00:00Z",
+              "updatedAt": "2026-06-18T09:05:00Z",
+              "totalRefundedSet": { "shopMoney": { "amount": "15.00" } },
+              "refundLineItems": {
+                "pageInfo": { "hasNextPage": false },
+                "nodes": [
+                  {
+                    "quantity": 1,
+                    "subtotalSet": { "shopMoney": { "amount": "15.00" } },
+                    "lineItem": { "sku": "MUG-01" }
+                  }
+                ]
+              },
+              "refundShippingLines": { "pageInfo": { "hasNextPage": false }, "nodes": [] },
+              "orderAdjustments": { "pageInfo": { "hasNextPage": false }, "nodes": [] }
+            }
+          ]
+        },
+        {
+          "id": "gid://shopify/Order/5551011",
+          "name": "#1011",
+          "test": true,
+          "cancelledAt": null,
+          "processedAt": "2026-06-16T11:00:00Z",
+          "totalRefundedSet": { "shopMoney": { "amount": "0.00" } },
+          "lineItems": {
+            "pageInfo": { "hasNextPage": false },
+            "nodes": [
+              {
+                "sku": "TEE-01",
+                "quantity": 1,
+                "originalUnitPriceSet": { "shopMoney": { "amount": "25.00" } },
+                "discountAllocations": []
+              }
+            ]
+          },
+          "shippingLines": { "pageInfo": { "hasNextPage": false }, "nodes": [] },
+          "refunds": []
+        }
+      ],
+      "pageInfo": { "hasNextPage": true, "endCursor": "eyJsYXN0X2lkIjo1NTUxMDExfQ==" }
+    }
+  },
+  "extensions": {
+    "cost": {
+      "requestedQueryCost": 42,
+      "actualQueryCost": 38,
+      "throttleStatus": { "maximumAvailable": 1000, "currentlyAvailable": 962, "restoreRate": 50 }
+    }
+  }
+}

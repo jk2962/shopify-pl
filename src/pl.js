@@ -19,14 +19,19 @@ function moneyBagCents(bag) {
   return centsFromAmount(bag.shopMoney.amount);
 }
 
+// Assembled from formatToParts rather than trusting a locale ('en-CA') to emit
+// YYYY-MM-DD: part order and separators are locale/ICU-data dependent, and
+// Apps Script's ICU is not Node's. A silent flip to MM/DD/YYYY here would
+// misbucket every row in the P/L while the Node tests stayed green.
 function shopLocalDate(isoString, timeZone) {
-  const formatter = new Intl.DateTimeFormat('en-CA', {
+  const parts = new Intl.DateTimeFormat('en-US', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  });
-  return formatter.format(new Date(isoString));
+  }).formatToParts(new Date(isoString));
+  const part = (type) => parts.find((p) => p.type === type).value;
+  return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
 function addDaysUTC(dateStr, days) {
@@ -112,6 +117,28 @@ function inRange(dateStr, startDate, endDate) {
   return dateStr >= startDate && dateStr <= endDate;
 }
 
+function normalizeRefund(r, timeZone) {
+  const date = shopLocalDate(r.processedAt || r.updatedAt, timeZone);
+
+  let merchandiseCents = 0;
+  const refundLineItems = ((r.refundLineItems && r.refundLineItems.nodes) || []).map((rli) => {
+    merchandiseCents += moneyBagCents(rli.subtotalSet);
+    return { sku: rli.lineItem.sku, quantity: rli.quantity };
+  });
+
+  let shippingCents = 0;
+  for (const rsl of (r.refundShippingLines && r.refundShippingLines.nodes) || []) {
+    shippingCents += moneyBagCents(rsl.subtotalAmountSet);
+  }
+
+  let discretionaryCents = 0;
+  for (const adj of (r.orderAdjustments && r.orderAdjustments.nodes) || []) {
+    discretionaryCents += moneyBagCents(adj.amountSet);
+  }
+
+  return { date, merchandiseCents, shippingCents, discretionaryCents, lineItems: refundLineItems };
+}
+
 function normalizeOrder(node, timeZone) {
   const lineItemNodes = (node.lineItems && node.lineItems.nodes) || [];
   const shippingNodes = (node.shippingLines && node.shippingLines.nodes) || [];
@@ -136,31 +163,13 @@ function normalizeOrder(node, timeZone) {
     shippingChargedCents += moneyBagCents(sl.discountedPriceSet);
   }
 
-  const refunds = refundList.map((r) => {
-    const date = shopLocalDate(r.processedAt || r.updatedAt, timeZone);
-
-    let merchandiseCents = 0;
-    const refundLineItems = ((r.refundLineItems && r.refundLineItems.nodes) || []).map((rli) => {
-      merchandiseCents += moneyBagCents(rli.subtotalSet);
-      return { sku: rli.lineItem.sku, quantity: rli.quantity };
-    });
-
-    let shippingCents = 0;
-    for (const rsl of (r.refundShippingLines && r.refundShippingLines.nodes) || []) {
-      shippingCents += moneyBagCents(rsl.subtotalAmountSet);
-    }
-
-    let discretionaryCents = 0;
-    for (const adj of (r.orderAdjustments && r.orderAdjustments.nodes) || []) {
-      discretionaryCents += moneyBagCents(adj.amountSet);
-    }
-
-    return { date, merchandiseCents, shippingCents, discretionaryCents, lineItems: refundLineItems };
-  });
+  const refunds = refundList.map((r) => normalizeRefund(r, timeZone));
 
   return {
     id: node.id,
     name: node.name,
+    test: node.test === true,
+    cancelled: node.cancelledAt !== null,
     counted: node.test === false && node.cancelledAt === null,
     date: shopLocalDate(node.processedAt, timeZone),
     units,
@@ -332,6 +341,7 @@ const api = {
   generatePeriods,
   mondayOfWeek,
   normalizeOrder,
+  normalizeRefund,
   computeRows,
   centsFromAmount,
 };

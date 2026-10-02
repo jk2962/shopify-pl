@@ -148,6 +148,25 @@ test('shop-local date is correct at 11:30pm local, including across DST transiti
   assert.equal(pl.shopLocalDate('2026-11-02T04:30:00Z', TZ), '2026-11-01');
 });
 
+test('an order just past midnight in the shop timezone must bucket by the shop timezone, not any other', () => {
+  // 2026-03-10T04:15:00Z is 2026-03-10 00:15 in America/New_York (EDT, -04:00)
+  // but still 2026-03-09 21:15 in America/Los_Angeles (PDT, -07:00) — a
+  // sheet/display timezone that differs from the shop's would misbucket this
+  // order into the previous day.
+  const processedAt = '2026-03-10T04:15:00Z';
+  const node = baseOrder({
+    processedAt,
+    lineItems: { nodes: [lineItem({ sku: 'MUG-01', quantity: 1, unitPrice: '15.00' })] },
+  });
+
+  const shopTzOrder = pl.normalizeOrder(node, 'America/New_York');
+  assert.equal(shopTzOrder.date, '2026-03-10', 'bucketed by the shop timezone, just past midnight there');
+
+  const wrongTzOrder = pl.normalizeOrder(node, 'America/Los_Angeles');
+  assert.equal(wrongTzOrder.date, '2026-03-09', 'a differing timezone would misbucket it to the previous day');
+  assert.notEqual(shopTzOrder.date, wrongTzOrder.date);
+});
+
 test('shipping cost: per-order vs per-unit', () => {
   const node = baseOrder({
     lineItems: { nodes: [lineItem({ sku: 'MUG-01', quantity: 4, unitPrice: '15.00' })] },
