@@ -2,6 +2,8 @@
 
 A Google Sheet that syncs orders from a Shopify store via the GraphQL Admin API and shows profit/loss by day, week, month, and year. Store owners edit costs (COGS, shipping, fees, other expenses) directly in the sheet, and the P/L recalculates instantly without a re-sync.
 
+Developers: `.clasp.json.example` is a placeholder — copy it to `.clasp.json` and fill in your script and spreadsheet IDs to use clasp.
+
 ## Setup (for the store owner)
 
 These steps assume the Google Sheet has already been shared with you and has the **P/L** menu at the top (next to File/Edit/View). If you just want to see how it works before connecting a real store, open the menu and click **P/L → Load demo data** first — it fills the sheet with ~120 sample orders and a working P/L.
