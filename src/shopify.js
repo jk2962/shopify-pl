@@ -452,16 +452,17 @@ function runSyncPass(ss) {
     state.cursor = page.endCursor;
     state.pageSize = nextPageSize(state.pageSize, page.cost);
     saveSyncState(props, state);
+    // Saved per page, alongside the checkpoint: if a later page throws, the
+    // resumed pass never re-reads this one, so the flag must already be stored.
+    if (taxesIncludedSeen && props.getProperty(PROPS.TAXES_INCLUDED_SEEN) !== 'true') {
+      props.setProperty(PROPS.TAXES_INCLUDED_SEEN, 'true');
+      setPlBanner(ss, hasReadAllOrders, true);
+    }
 
     if (!page.hasNextPage) {
       done = true;
       break;
     }
-  }
-
-  if (taxesIncludedSeen && props.getProperty(PROPS.TAXES_INCLUDED_SEEN) !== 'true') {
-    props.setProperty(PROPS.TAXES_INCLUDED_SEEN, 'true');
-    setPlBanner(ss, hasReadAllOrders, true);
   }
 
   if (done) {
