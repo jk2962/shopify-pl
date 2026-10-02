@@ -84,6 +84,14 @@ test('last30DaysRange is a 30-day inclusive window ending on today local date', 
   assert.equal(start, '2026-06-01');
 });
 
+test('last30DaysRange takes "today" from the shop timezone, not the script timezone', () => {
+  // 23:30 UTC on 2026-06-29 = 19:30 in New York (script timezone), but already
+  // 00:30 on 2026-06-30 in London: a London shop's Daily range must include the 30th.
+  const now = new Date('2026-06-29T23:30:00Z');
+  assert.deepEqual(last30DaysRange(now, 'America/New_York'), { start: '2026-05-31', end: '2026-06-29' });
+  assert.deepEqual(last30DaysRange(now, 'Europe/London'), { start: '2026-06-01', end: '2026-06-30' });
+});
+
 test('plBannerText shows the 60-day and tax-inclusive caveats, together or not at all', () => {
   assert.equal(plBannerText(true, false), '');
   assert.match(plBannerText(false, false), /last 60 days/);

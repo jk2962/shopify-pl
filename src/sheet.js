@@ -34,6 +34,10 @@ const ORDERS_COLUMNS = [
 
 const SHOP_TIMEZONE_PROP = 'shopify_shop_timezone';
 
+// pl.js via require in Node; its bare globals (shared Apps Script scope) otherwise.
+// eslint-disable-next-line no-var
+var pl = typeof require !== 'undefined' ? require('./pl.js') : null;
+
 const PL_NOTE =
   'How numbers are calculated: bucketed by the connected Shopify store’s timezone, weeks start Monday. ' +
   'Cancelled and test orders are excluded. Taxes are excluded throughout. Refunds are dated ' +
@@ -82,14 +86,27 @@ function clearRange(sheet, startRow, numCols, { formatsToo = false } = {}) {
   }
 }
 
-// Returns yyyy-mm-dd strings, not Date objects. setValue(aDate) converts using
-// the SCRIPT timezone, so a UTC-midnight Date lands on the previous calendar
-// day everywhere west of UTC — which silently clipped today's orders off the
+// "Today" as a yyyy-mm-dd date in the shop's timezone. Before the first sync
+// (e.g. demo data) no shop timezone is stored yet, so fall back to the
+// script's own timezone.
+function todayYmd(now, shopTimeZone) {
+  if (!shopTimeZone) return localYmd(now);
+  const iso = now.toISOString();
+  return pl ? pl.shopLocalDate(iso, shopTimeZone) : shopLocalDate(iso, shopTimeZone);
+}
+
+function shiftYmd(ymdStr, months, days) {
+  const [y, m, d] = ymdStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1 + months, d + days)).toISOString().slice(0, 10);
+}
+
+// Returns yyyy-mm-dd strings, not Date objects. Sheets displays a Date value in
+// the spreadsheet's timezone, so a UTC-midnight Date showed as the previous
+// calendar day anywhere west of UTC — which clipped today's orders off the
 // Daily default range and shifted the start a day early.
-function last30DaysRange(today) {
-  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 29);
-  return { start: localYmd(start), end: localYmd(end) };
+function last30DaysRange(now, shopTimeZone) {
+  const end = todayYmd(now, shopTimeZone);
+  return { start: shiftYmd(end, 0, -29), end };
 }
 
 function getOrCreateSheet(ss, name) {
@@ -298,10 +315,9 @@ function ensurePlSheet(ss) {
       SpreadsheetApp.newDataValidation().requireValueInList(['Daily', 'Weekly', 'Monthly', 'Yearly'], true).build()
     );
 
-  const today = new Date();
-  const start = new Date(today.getFullYear(), today.getMonth() - 14, today.getDate());
-  sheet.getRange('D2').setValue(localYmd(start)).setNumberFormat('yyyy-mm-dd');
-  sheet.getRange('F2').setValue(localYmd(today)).setNumberFormat('yyyy-mm-dd');
+  const today = todayYmd(new Date(), PropertiesService.getScriptProperties().getProperty(SHOP_TIMEZONE_PROP));
+  sheet.getRange('D2').setValue(shiftYmd(today, -14, 0)).setNumberFormat('yyyy-mm-dd');
+  sheet.getRange('F2').setValue(today).setNumberFormat('yyyy-mm-dd');
 
   sheet.getRange(PL_HEADER_ROW, 1, 1, PL_COLUMNS.length).setValues([PL_COLUMNS]);
   sheet.getRange(PL_HEADER_ROW, 1, 1, PL_COLUMNS.length).setFontWeight('bold');
@@ -455,7 +471,10 @@ function maybeDefaultDailyRange(sheet, range) {
   const isTimeframeCell = range.getRow() === PL_CONTROLS_ROW && range.getColumn() === 2;
   if (!isTimeframeCell) return;
   if (String(range.getValue() || '').trim().toLowerCase() !== 'daily') return;
-  const { start, end } = last30DaysRange(new Date());
+  const { start, end } = last30DaysRange(
+    new Date(),
+    PropertiesService.getScriptProperties().getProperty(SHOP_TIMEZONE_PROP)
+  );
   sheet.getRange('D2').setValue(start).setNumberFormat('yyyy-mm-dd');
   sheet.getRange('F2').setValue(end).setNumberFormat('yyyy-mm-dd');
 }
